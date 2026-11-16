@@ -5,7 +5,7 @@ import re
 st.set_page_config(page_title="Usklađivanje Overseas faktura i Izlaza", layout="wide")
 
 st.title("📦 Pametno usklađivanje Overseas faktura i Izlaza")
-st.markdown("Aplikacija spaja po broju otpremnice, a preostale stavke povezuje kombinacijom **Naziva korisnika, Adrese i Mjesta**!")
+st.markdown("Aplikacija spaja po broju otpremnice, a preostale stavke robusno povezuje po **Nazivu korisnika** i **Mjestu/Gradu**!")
 
 # Sidebar za učitavanje datoteka
 file_overseas = st.sidebar.file_uploader("Učitaj Overseas prilog (Excel)", type=["xlsx", "xls"])
@@ -67,16 +67,13 @@ if file_overseas and file_analiza:
 
     # Pronalazak ključnih stupaca u Analizi izlaza
     korisnik_col = next((c for c in df_an.columns if 'korisnik' in str(c).lower()), df_an.columns[6])
-    adresa_col = next((c for c in df_an.columns if 'adresa' in str(c).lower()), df_an.columns[7])
     mjesto_col = next((c for c in df_an.columns if 'mjesta' in str(c).lower() or 'grad' in str(c).lower()), df_an.columns[9])
 
-    # Priprema čistih tekstova za usporedbu
+    # Priprema čistih tekstova
     df_an['Clean_Korisnik'] = df_an[korisnik_col].apply(clean_text)
-    df_an['Clean_Adresa'] = df_an[adresa_col].apply(clean_text)
     df_an['Clean_Mjesto'] = df_an[mjesto_col].apply(clean_text)
 
     df_ov['Clean_Consignee'] = df_ov['Consignee Name'].apply(clean_text)
-    df_ov['Clean_Street'] = df_ov['Consignee Street'].apply(clean_text) if 'Consignee Street' in df_ov.columns else ""
     df_ov['Clean_Town'] = df_ov['Consignee Town'].apply(clean_text) if 'Consignee Town' in df_ov.columns else ""
 
     # Ekstrakcija broja otpremnice iz Overseas reference
@@ -96,7 +93,7 @@ if file_overseas and file_analiza:
                 df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = match.iloc[0][broj_col]
                 df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = match.iloc[0][korisnik_col]
 
-    # KORAK 2: Spajanje preostalih po Nazivu korisnika + Mjestu
+    # KORAK 2: Spajanje preostalih po Nazivu korisnika i Mjestu
     unmatched_mask = df_ov['Matched_Method'].isna()
     for idx, row in df_ov[unmatched_mask].iterrows():
         c_name = row['Clean_Consignee']
@@ -108,36 +105,16 @@ if file_overseas and file_analiza:
         for _, an_row in df_an.iterrows():
             ak = str(an_row['Clean_Korisnik'])
             am = str(an_row['Clean_Mjesto'])
-            # Provjera poklapanja naziva i grada/mjesta
-            if len(ak) > 2 and (ak in c_name or c_name in ak):
+            
+            # Provjera: ako naziv iz analize sadrži dio imena ili obratno (uz duljinu > 4)
+            if len(ak) > 4 and (ak in c_name or c_name in ak):
+                # Ako postoji mjesto, provjeri se i mjesto, inače je dovoljno poklapanje imena
                 if not c_town or not am or (am in c_town or c_town in am):
                     matched_row = an_row
                     break
 
         if matched_row is not None:
             df_ov.loc[idx, 'Matched_Method'] = 'Naziv + Mjesto'
-            df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = matched_row[broj_col]
-            df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = matched_row[korisnik_col]
-
-    # KORAK 3: Spajanje preostalih po Nazivu korisnika + Adresi
-    unmatched_mask = df_ov['Matched_Method'].isna()
-    for idx, row in df_ov[unmatched_mask].iterrows():
-        c_name = row['Clean_Consignee']
-        c_street = row['Clean_Street']
-        if len(c_name) < 3:
-            continue
-
-        matched_row = None
-        for _, an_row in df_an.iterrows():
-            ak = str(an_row['Clean_Korisnik'])
-            aa = str(an_row['Clean_Adresa'])
-            if len(ak) > 2 and (ak in c_name or c_name in ak):
-                if c_street and aa and (aa in c_street or c_street in aa):
-                    matched_row = an_row
-                    break
-
-        if matched_row is not None:
-            df_ov.loc[idx, 'Matched_Method'] = 'Naziv + Adresa'
             df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = matched_row[broj_col]
             df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = matched_row[korisnik_col]
 
