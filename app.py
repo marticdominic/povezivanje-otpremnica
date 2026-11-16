@@ -75,7 +75,10 @@ if file_overseas and file_analiza:
         
         if len(unmatched) > 0:
             display_cols_ov = [c for c in ['Invoice Number', 'Shipping Date', 'Consignee Name', 'Consignee Town', 'Reference 1', 'Transport Price', 'Total Price'] if c in unmatched.columns]
-            st.dataframe(unmatched[display_cols_ov], use_container_width=True)
+            
+            # Pretvaranje u string radi sprječavanja PyArrow grešaka u Streamlitu
+            df_display_unmatched = unmatched[display_cols_ov].astype(str)
+            st.dataframe(df_display_unmatched, use_container_width=True)
 
             csv = unmatched.to_csv(index=False).encode('utf-8')
             st.download_button(
@@ -91,14 +94,16 @@ if file_overseas and file_analiza:
         st.subheader("Uspješno povezane stavke")
         if len(matched) > 0:
             display_cols_matched = [c for c in ['Invoice Number', 'Extracted_OT', 'Consignee Name', 'Naziv korisnika', 'Transport Price', 'Total Price'] if c in matched.columns]
-            st.dataframe(matched[display_cols_matched], use_container_width=True)
+            df_display_matched = matched[display_cols_matched].astype(str)
+            st.dataframe(df_display_matched, use_container_width=True)
         else:
             st.info("Nema uspješno povezanih stavki.")
 
     with tab3:
         st.subheader("Detaljna tablica spajanja (Merge Result)")
-        # Ispravljeno sa 'merged' na 'merged_df'
-        st.dataframe(merged_df[['Invoice Number', 'Reference 1', 'Extracted_OT', 'Consignee Name', '_merge']], use_container_width=True)
+        summary_cols = [c for c in ['Invoice Number', 'Reference 1', 'Extracted_OT', 'Consignee Name', '_merge'] if c in merged_df.columns]
+        df_display_summary = merged_df[summary_cols].astype(str)
+        st.dataframe(df_display_summary, use_container_width=True)
 
 else:
     st.info("👈 Molimo vas da učitate obje Excel datoteke u bočnoj traci (sidebaru) kako bi aplikacija pokrenula analizu.")
