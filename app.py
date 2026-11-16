@@ -5,7 +5,7 @@ import re
 st.set_page_config(page_title="Usklađivanje Overseas faktura i Izlaza", layout="wide")
 
 st.title("📦 Pametno usklađivanje Overseas faktura i Izlaza")
-st.markdown("Aplikacija spaja po broju otpremnice, a preostale stavke robusno povezuje po **Nazivu korisnika** i **Mjestu/Gradu**!")
+st.markdown("Aplikacija spaja po broju otpremnice, a preostale stavke detaljno uspoređuje po **Adresi**, **Mjestu** i **Nazivu korisnika**!")
 
 # Sidebar za učitavanje datoteka
 file_overseas = st.sidebar.file_uploader("Učitaj Overseas prilog (Excel)", type=["xlsx", "xls"])
@@ -30,6 +30,15 @@ def clean_text(text):
         text = text.replace(word, ' ')
     return ' '.join(text.split())
 
+def clean_address(text):
+    if pd.isna(text):
+        return ""
+    text = str(text).lower()
+    # Uklanjanje čestih oznaka u adresama radi bolje usporedbe
+    for word in ['ulica', 'ul.', 'dr.', 'bb', 'kbr', 'k.br.', ',', '.', '/']:
+        text = text.replace(word, ' ')
+    return ' '.join(text.split())
+
 if file_overseas and file_analiza:
     @st.cache_data
     def load_data(f_overseas, f_analiza):
@@ -46,7 +55,7 @@ if file_overseas and file_analiza:
 
     df_ov, df_an = load_data(file_overseas, file_analiza)
 
-    # Pronalazak stupca za broj otpremnice
+    # Pronalazak stupca za broj otpremnice u Analizi izlaza
     broj_col = None
     for col in df_an.columns:
         if str(col).strip().lower() in ['broj', 'broj dokumenta', 'otpremnica']:
@@ -65,19 +74,28 @@ if file_overseas and file_analiza:
 
     df_an['Broj_int'] = df_an[broj_col].apply(clean_broj)
 
-    # Pronalazak ključnih stupaca u Analizi izlaza
-    korisnik_col = next((c for c in df_an.columns if 'korisnik' in str(c).lower()), df_an.columns[6])
-    mjesto_col = next((c for c in df_an.columns if 'mjesta' in str(c).lower() or 'grad' in str(c).lower()), df_an.columns[9])
+    # Identifikacija stupaca u Analizi izlaza (fleksibilno pretraživanje)
+    korisnik_col = next((c for c in df_an.columns if any(k in str(c).lower() for k in ['korisnik', 'naziv'])), df_an.columns[6])
+    adresa_col = next((c for c in df_an.columns if any(k in str(c).lower() for k in ['adresa', 'ulica'])), None)
+    mjesto_col = next((c for c in df_an.columns if any(k in str(c).lower() for k in ['mjesto', 'grad', 'posta'])), df_an.columns[9])
 
-    # Priprema čistih tekstova
+    # Identifikacija stupaca u Overseas datoteci
+    ov_name_col = next((c for c in df_ov.columns if 'consignee name' in str(c).lower() or 'naziv' in str(c).lower()), 'Consignee Name')
+    ov_street_col = next((c for c in df_ov.columns if any(k in str(c).lower() for k in ['street', 'adresa', 'ulica'])), 'Consignee Street')
+    ov_town_col = next((c for c in df_ov.columns if any(k in str(c).lower() for k in ['town', 'city', 'mjesto', 'grad'])), 'Consignee Town')
+
+    # Priprema čistih podataka za usporedbu
     df_an['Clean_Korisnik'] = df_an[korisnik_col].apply(clean_text)
-    df_an['Clean_Mjesto'] = df_an[mjesto_col].apply(clean_text)
+    df_an['Clean_Adresa'] = df_an[adresa_col].apply(clean_address) if adresa_col else ""
+    df_an['Clean_Mjesto'] = df_an[mjesto_col].apply(clean_text) if mjesto_col else ""
 
-    df_ov['Clean_Consignee'] = df_ov['Consignee Name'].apply(clean_text)
-    df_ov['Clean_Town'] = df_ov['Consignee Town'].apply(clean_text) if 'Consignee Town' in df_ov.columns else ""
+    df_ov['Clean_Consignee'] = df_ov[ov_name_col].apply(clean_text) if ov_name_col in df_ov.columns else ""
+    df_ov['Clean_Street'] = df_ov[ov_street_col].apply(clean_address) if ov_street_col in df_ov.columns else ""
+    df_ov['Clean_Town'] = df_ov[ov_town_col].apply(clean_text) if ov_town_col in df_ov.columns else ""
 
     # Ekstrakcija broja otpremnice iz Overseas reference
-    df_ov['Extracted_OT'] = df_ov['Reference 1'].apply(extract_ot_number)
+    ref_col = 'Reference 1' if 'Reference 1' in df_ov.columns else df_ov.columns[0]
+    df_ov['Extracted_OT'] = df_ov[ref_col].apply(extract_ot_number)
 
     df_ov['Matched_Method'] = None
     df_ov['Matched_Broj_Otpremnice'] = None
@@ -93,28 +111,35 @@ if file_overseas and file_analiza:
                 df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = match.iloc[0][broj_col]
                 df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = match.iloc[0][korisnik_col]
 
-    # KORAK 2: Spajanje preostalih po Nazivu korisnika i Mjestu
+    # KORAK 2: Spajanje preostalih po Adresi, Mjestu i Nazivu korisnika
     unmatched_mask = df_ov['Matched_Method'].isna()
     for idx, row in df_ov[unmatched_mask].iterrows():
         c_name = row['Clean_Consignee']
+        c_street = row['Clean_Street']
         c_town = row['Clean_Town']
-        if len(c_name) < 3:
-            continue
-
+        
         matched_row = None
         for _, an_row in df_an.iterrows():
             ak = str(an_row['Clean_Korisnik'])
+            aa = str(an_row['Clean_Adresa'])
             am = str(an_row['Clean_Mjesto'])
             
-            # Provjera: ako naziv iz analize sadrži dio imena ili obratno (uz duljinu > 4)
-            if len(ak) > 4 and (ak in c_name or c_name in ak):
-                # Ako postoji mjesto, provjeri se i mjesto, inače je dovoljno poklapanje imena
-                if not c_town or not am or (am in c_town or c_town in am):
-                    matched_row = an_row
-                    break
+            # Provjera poklapanja: Ulica + Mjesto + Naziv
+            score = 0
+            if len(c_street) > 3 and aa and (aa in c_street or c_street in aa):
+                score += 2  # Adresa nosi veću težinu
+            if len(c_town) > 2 and am and (am in c_town or c_town in am):
+                score += 1  # Mjesto
+            if len(c_name) > 3 and ak and (ak in c_name or c_name in ak):
+                score += 2  # Naziv
+
+            # Uvjet za uspješno spajanje (npr. poklopljena adresa/naziv uz mjesto, ili visoka podudarnost)
+            if score >= 3: 
+                matched_row = an_row
+                break
 
         if matched_row is not None:
-            df_ov.loc[idx, 'Matched_Method'] = 'Naziv + Mjesto'
+            df_ov.loc[idx, 'Matched_Method'] = 'Adresa + Mjesto + Naziv'
             df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = matched_row[broj_col]
             df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = matched_row[korisnik_col]
 
@@ -138,7 +163,7 @@ if file_overseas and file_analiza:
     with tab1:
         st.subheader("Uspješno povezane stavke")
         if len(matched) > 0:
-            display_cols = ['Invoice Number', 'Matched_Method', 'Matched_Broj_Otpremnice', 'Consignee Name', 'Matched_Naziv_Korisnika', 'Total Price']
+            display_cols = ['Invoice Number', 'Matched_Method', 'Matched_Broj_Otpremnice', ov_name_col, 'Matched_Naziv_Korisnika', 'Total Price']
             available_cols = [c for c in display_cols if c in matched.columns]
             st.dataframe(matched[available_cols].astype(str), use_container_width=True)
 
@@ -155,7 +180,7 @@ if file_overseas and file_analiza:
     with tab2:
         st.subheader("Stavke koje se nisu mogle povezati")
         if len(unmatched) > 0:
-            display_cols_un = [c for c in ['Invoice Number', 'Shipping Date', 'Consignee Name', 'Consignee Town', 'Reference 1', 'Total Price'] if c in unmatched.columns]
+            display_cols_un = [c for c in ['Invoice Number', 'Shipping Date', ov_name_col, ov_street_col, ov_town_col, ref_col, 'Total Price'] if c in unmatched.columns]
             st.dataframe(unmatched[display_cols_un].astype(str), use_container_width=True)
 
             csv_un = unmatched.to_csv(index=False).encode('utf-8')
@@ -170,7 +195,7 @@ if file_overseas and file_analiza:
 
     with tab3:
         st.subheader("Pregled svih stavki i metoda spajanja")
-        summary_cols = [c for c in ['Invoice Number', 'Reference 1', 'Consignee Name', 'Matched_Method', 'Matched_Broj_Otpremnice', 'Total Price'] if c in df_ov.columns]
+        summary_cols = [c for c in ['Invoice Number', ref_col, ov_name_col, 'Matched_Method', 'Matched_Broj_Otpremnice', 'Total Price'] if c in df_ov.columns]
         st.dataframe(df_ov[summary_cols].astype(str), use_container_width=True)
 
 else:
