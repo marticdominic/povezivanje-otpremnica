@@ -18,7 +18,6 @@ def extract_ot_number(ref):
     match = re.search(r'OT\s*(\d+)', str(ref), re.IGNORECASE)
     if match:
         return int(match.group(1))
-    # Ako nema prefiksa OT, provjeri je li cijeli string čisti broj otpremnice
     clean_str = re.sub(r'\D', '', str(ref))
     if clean_str.isdigit() and len(clean_str) >= 4:
         return int(clean_str)
@@ -28,7 +27,7 @@ if file_overseas and file_analiza:
     @st.cache_data
     def load_data(f_overseas, f_analiza):
         df_ov = pd.read_excel(f_overseas)
-        df_an = pd.read_excel(f_analiza, header=1) # Pretpostavka da je zaglavlje u 2. redu kao u tvom primjeru
+        df_an = pd.read_excel(f_analiza, header=1)
         return df_ov, df_an
 
     df_ov, df_an = load_data(file_overseas, file_analiza)
@@ -43,7 +42,7 @@ if file_overseas and file_analiza:
         st.error("U Analizi izlaza nije pronađen stupac 'Broj'. Provjerite strukturu tablice.")
         st.stop()
 
-    # Spajanje tablica (Left join sOverseas na Analizu)
+    # Spajanje tablica (Left join s Overseas na Analizu)
     merged_df = pd.merge(
         df_ov,
         df_an,
@@ -75,11 +74,9 @@ if file_overseas and file_analiza:
         st.markdown("Ovdje se nalaze pošiljke za koje u polju `Reference 1` nije pronađen odgovarajući broj otpremnice ili otpremnica ne postoji u Analizi izlaza za taj mjesec.")
         
         if len(unmatched) > 0:
-            # Odabir bitnih stupaca za pregled
             display_cols_ov = [c for c in ['Invoice Number', 'Shipping Date', 'Consignee Name', 'Consignee Town', 'Reference 1', 'Transport Price', 'Total Price'] if c in unmatched.columns]
             st.dataframe(unmatched[display_cols_ov], use_container_width=True)
 
-            # Gumb za preuzimanje neuspjelih
             csv = unmatched.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Preuzmi nepovezane stavke kao CSV",
@@ -100,7 +97,8 @@ if file_overseas and file_analiza:
 
     with tab3:
         st.subheader("Detaljna tablica spajanja (Merge Result)")
-        st.dataframe(merged[['Invoice Number', 'Reference 1', 'Extracted_OT', 'Consignee Name', '_merge']], use_container_width=True)
+        # Ispravljeno sa 'merged' na 'merged_df'
+        st.dataframe(merged_df[['Invoice Number', 'Reference 1', 'Extracted_OT', 'Consignee Name', '_merge']], use_container_width=True)
 
 else:
     st.info("👈 Molimo vas da učitate obje Excel datoteke u bočnoj traci (sidebaru) kako bi aplikacija pokrenula analizu.")
