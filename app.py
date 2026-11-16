@@ -6,7 +6,7 @@ import difflib
 st.set_page_config(page_title="Usklađivanje Overseas faktura i Izlaza", layout="wide")
 
 st.title("📦 Pametno usklađivanje Overseas faktura i Izlaza")
-st.markdown("Aplikacija spaja po broju otpremnice, a preostale stavke povezuje po preciznom nazivu kupca iz tvoje tablice!")
+st.markdown("Aplikacija automatski prepoznaje stupce, spaja po broju otpremnice, a preostale stavke povezuje po preciznom nazivu kupca!")
 
 # Sidebar za učitavanje datoteka
 file_overseas = st.sidebar.file_uploader("Učitaj Overseas prilog (Excel)", type=["xlsx", "xls"])
@@ -35,18 +35,44 @@ if file_overseas and file_analiza:
     @st.cache_data
     def load_data(f_overseas, f_analiza):
         df_ov = pd.read_excel(f_overseas)
-        df_an = pd.read_excel(f_analiza, header=1)
+        
+        # Pokušaj automatski pronaći red u kojem se nalaze zaglavlja u Analizi izlaza
+        df_raw = pd.read_excel(f_analiza, header=None)
+        header_row = 1
+        for idx, row in df_raw.iterrows():
+            row_str = row.astype(str).str.cat(sep=' ').lower()
+            if 'broj' in row_str and ('naziv' in row_str or 'korisnik' in row_str):
+                header_row = idx
+                break
+                
+        df_an = pd.read_excel(f_analiza, header=header_row)
         return df_ov, df_an
 
     df_ov, df_an = load_data(file_overseas, file_analiza)
 
-    # 1. Ekstrakcija broja otpremnice iz reference
+    # Pronalazak stupca za broj otpremnice bez obzira na točno ime
+    broj_col = None
+    for col in df_an.columns:
+        if str(col).strip().lower() in ['broj', 'broj dokumenta', 'otpremnica']:
+            broj_col = col
+            break
+    if not broj_col:
+        # Ako nije našlo točno, uzmi drugi stupac (gdje je obično broj otpremnice)
+        broj_col = df_an.columns[1] if len(df_an.columns) > 1 else df_an.columns[0]
+
+    # 1. Ekstrakcija broja otpremnice iz Overseas reference
     df_ov['Extracted_OT'] = df_ov['Reference 1'].apply(extract_ot_number)
-    if 'Broj' in df_an.columns:
-        df_an['Broj_int'] = pd.to_numeric(df_an['Broj'], errors='coerce')
-    else:
-        st.error("U Analizi izlaza nije pronađen stupac 'Broj'.")
-        st.stop()
+    
+    # Priprema brojeva u Analizi izlaza (uklanjanje točaka i pretvorba u int)
+    def clean_broj(val):
+        if pd.isna(val):
+            return None
+        s = str(val).replace('.', '').replace(',', '').strip()
+        if s.isdigit():
+            return int(s)
+        return None
+
+    df_an['Broj_int'] = df_an[broj_col].apply(clean_broj)
 
     # Inicijalizacija stupaca
     df_ov['Matched_Method'] = None
@@ -60,14 +86,22 @@ if file_overseas and file_analiza:
             match = df_an[df_an['Broj_int'] == ot]
             if not match.empty:
                 df_ov.loc[idx, 'Matched_Method'] = 'Broj Otpremnice'
-                df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = match.iloc[0]['Broj']
-                df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = match.iloc[0].get('Naziv korisnika', '')
+                df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = match.iloc[0][broj_col]
+                # Pronađi naziv korisnika/partnera automatski
+                korisnik_cols = [c for c in df_an.columns if 'korisnik' in str(c).lower() or 'partner' in str(c).lower()]
+                df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = match.iloc[0][korisnik_cols[0]] if korisnik_cols else ''
 
     # KORAK 2: Spajanje preostalih po preciznom nazivu kupca
     unmatched_mask = df_ov['Matched_Method'].isna()
     
-    df_an['Clean_Korisnik'] = df_an['Naziv korisnika'].apply(clean_name)
-    df_an['Clean_Partner'] = df_an['Naziv partnera'].apply(clean_name)
+    korisnik_cols = [c for c in df_an.columns if 'korisnik' in str(c).lower()]
+    partner_cols = [c for c in df_an.columns if 'partner' in str(c).lower()]
+    
+    col_k = korisnik_cols[0] if korisnik_cols else df_an.columns[5]
+    col_p = partner_cols[0] if partner_cols else df_an.columns[4]
+
+    df_an['Clean_Korisnik'] = df_an[col_k].apply(clean_name)
+    df_an['Clean_Partner'] = df_an[col_p].apply(clean_name)
     
     clean_korisnici_list = [str(x) for x in df_an['Clean_Korisnik'].dropna().unique() if len(str(x)) > 3]
 
@@ -81,24 +115,24 @@ if file_overseas and file_analiza:
         matched_broj = None
         matched_naziv = None
 
-        # A) Tražimo strogo poklapanje (ako naziv iz analize sadrži Overseas naziv ili obratno)
+        # A) Strogo poklapanje
         for _, an_row in df_an.iterrows():
             ck = str(an_row['Clean_Korisnik'])
             cp = str(an_row['Clean_Partner'])
             if (len(ck) > 3 and (ck in ov_clean or ov_clean in ck)) or \
                (len(cp) > 3 and (cp in ov_clean or ov_clean in cp)):
-                matched_broj = an_row['Broj']
-                matched_naziv = an_row.get('Naziv korisnika', '')
+                matched_broj = an_row[broj_col]
+                matched_naziv = an_row[col_k]
                 break
 
-        # B) Ako nema direktnog sadrži-u-sebi, tražimo visoku sličnost (cutoff povisujemo na 0.82 da nema grešaka)
+        # B) Tekstualna sličnost
         if matched_broj is None and clean_korisnici_list:
             close_matches = difflib.get_close_matches(ov_clean, clean_korisnici_list, n=1, cutoff=0.82)
             if close_matches:
                 best_match_str = close_matches[0]
                 matched_row = df_an[df_an['Clean_Korisnik'] == best_match_str].iloc[0]
-                matched_broj = matched_row['Broj']
-                matched_naziv = matched_row.get('Naziv korisnika', '')
+                matched_broj = matched_row[broj_col]
+                matched_naziv = matched_row[col_k]
 
         if matched_broj is not None:
             df_ov.loc[idx, 'Matched_Method'] = 'Naziv Kupca'
