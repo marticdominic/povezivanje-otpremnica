@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import re
+from fuzzywuzzy import fuzz
 
 st.set_page_config(page_title="Usklađivanje Overseas faktura i Izlaza", layout="wide")
 
-st.title("📦 Usklađivanje Overseas faktura i Analize izlaza")
-st.markdown("Ova aplikacija spaja podatke s Overseas fakture i vaše interne analize izlaza po broju otpremnice te prikazuje neusklađene stavke.")
+st.title("📦 Pametno usklađivanje Overseas faktura i Izlaza")
+st.markdown("Aplikacija sada automatski spaja po broju otpremnice, a preostale stavke pokušava povezati **po nazivu kupca**!")
 
 # Sidebar za učitavanje datoteka
 st.sidebar.header("1. Učitavanje datoteka")
@@ -23,6 +24,15 @@ def extract_ot_number(ref):
         return int(clean_str)
     return None
 
+def clean_name(name):
+    if pd.isna(name):
+        return ""
+    # Uklanjanje čestih sufiksa i pretvaranje u mala slova za bolju usporedbu
+    name = str(name).lower()
+    for word in ['d.o.o.', 'd.d.', 'j.d.o.o.', '-', 'isporuka', 'skladište']:
+        name = name.replace(word, '')
+    return ''.join(e for e in name if e.isalnum())
+
 if file_overseas and file_analiza:
     @st.cache_data
     def load_data(f_overseas, f_analiza):
@@ -32,29 +42,65 @@ if file_overseas and file_analiza:
 
     df_ov, df_an = load_data(file_overseas, file_analiza)
 
-    # Ekstrakcija broja otpremnice iz Overseas reference (Reference 1)
+    # 1. Ekstrakcija broja otpremnice
     df_ov['Extracted_OT'] = df_ov['Reference 1'].apply(extract_ot_number)
-    
-    # Priprema broja otpremnice u analizi izlaza
     if 'Broj' in df_an.columns:
         df_an['Broj_int'] = pd.to_numeric(df_an['Broj'], errors='coerce')
     else:
-        st.error("U Analizi izlaza nije pronađen stupac 'Broj'. Provjerite strukturu tablice.")
+        st.error("U Analizi izlaza nije pronađen stupac 'Broj'.")
         st.stop()
 
-    # Spajanje tablica (Left join s Overseas na Analizu)
-    merged_df = pd.merge(
-        df_ov,
-        df_an,
-        left_on='Extracted_OT',
-        right_on='Broj_int',
-        how='left',
-        indicator=True
-    )
+    # Inicijalizacija stupaca za praćenje načina spajanja
+    df_ov['Matched_Method'] = None
+    df_ov['Matched_Broj_Otpremnice'] = None
+    df_ov['Matched_Naziv_Korisnika'] = None
+    df_ov['Transport Price Matched'] = 0.0
+    df_ov['Total Price Matched'] = 0.0
 
-    # Definiranje uspješno spojenih i neuspjelih
-    matched = merged_df[merged_df['_merge'] == 'both']
-    unmatched = merged_df[merged_df['_merge'] == 'left_only']
+    # KORAK 1: Spajanje po broju otpremnice
+    for idx, row in df_ov.iterrows():
+        ot = row['Extracted_OT']
+        if pd.notna(ot):
+            match = df_an[df_an['Broj_int'] == ot]
+            if not match.empty:
+                df_ov.loc[idx, 'Matched_Method'] = 'Broj Otpremnice'
+                df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = match.iloc[0]['Broj']
+                df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = match.iloc[0].get('Naziv korisnika', '')
+                df_ov.loc[idx, 'Transport Price Matched'] = row.get('Transport Price', 0)
+                df_ov.loc[idx, 'Total Price Matched'] = row.get('Total Price', 0)
+
+    # KORAK 2: Spajanje preostalih po nazivu kupca
+    unmatched_mask = df_ov['Matched_Method'].isna()
+    
+    # Priprema naziva u analizi izlaza za usporedbu
+    df_an['Clean_Korisnik'] = df_an['Naziv korisnika'].apply(clean_name)
+    df_an['Clean_Partner'] = df_an['Naziv partnera'].apply(clean_name)
+
+    for idx, row in df_ov[unmatched_mask].iterrows():
+        ov_name_raw = row['Consignee Name']
+        ov_clean = clean_name(ov_name_raw)
+        
+        if len(ov_clean) < 3:
+            continue
+
+        # Pokušaj pronaći točno podudaranje ili visoku sličnost
+        best_match = None
+        for _, an_row in df_an.iterrows():
+            if ov_clean in str(an_row['Clean_Korisnik']) or ov_clean in str(an_row['Clean_Partner']) or \
+               str(an_row['Clean_Korisnik']) in ov_clean:
+                best_match = an_row
+                break
+        
+        if best_match is not None:
+            df_ov.loc[idx, 'Matched_Method'] = 'Naziv Kupca'
+            df_ov.loc[idx, 'Matched_Broj_Otpremnice'] = best_match['Broj']
+            df_ov.loc[idx, 'Matched_Naziv_Korisnika'] = best_match.get('Naziv korisnika', '')
+            df_ov.loc[idx, 'Transport Price Matched'] = row.get('Transport Price', 0)
+            df_ov.loc[idx, 'Total Price Matched'] = row.get('Total Price', 0)
+
+    # Definiranje konačnih skupova
+    matched = df_ov[df_ov['Matched_Method'].notna()]
+    unmatched = df_ov[df_ov['Matched_Method'].isna()]
 
     # Prikaz metrika
     st.markdown("---")
@@ -67,43 +113,35 @@ if file_overseas and file_analiza:
     col4.metric("Iznos nepovezanih troškova", f"{total_cost_unmatched:,.2f} EUR")
 
     # Tabs za pregled
-    tab1, tab2, tab3 = st.tabs(["❌ Nepovezane stavke (Faktura)", "✅ Uspješno povezane", "📊 Sveukupni pregled spajanja"])
+    tab1, tab2, tab3 = st.tabs(["❌ Još uvijek nepovezane", "✅ Uspješno povezano (Otpremnica + Naziv)", "📊 Detalji spajanja"])
 
     with tab1:
-        st.subheader("Stavke s Overseas fakture koje se nisu mogle povezati s otpremnicama")
-        st.markdown("Ovdje se nalaze pošiljke za koje u polju `Reference 1` nije pronađen odgovarajući broj otpremnice ili otpremnica ne postoji u Analizi izlaza za taj mjesec.")
-        
+        st.subheader("Stavke koje se nisu mogle povezati ni po broju ni po nazivu kupca")
         if len(unmatched) > 0:
-            display_cols_ov = [c for c in ['Invoice Number', 'Shipping Date', 'Consignee Name', 'Consignee Town', 'Reference 1', 'Transport Price', 'Total Price'] if c in unmatched.columns]
-            
-            # Pretvaranje u string radi sprječavanja PyArrow grešaka u Streamlitu
-            df_display_unmatched = unmatched[display_cols_ov].astype(str)
-            st.dataframe(df_display_unmatched, use_container_width=True)
+            display_cols_ov = [c for c in ['Invoice Number', 'Shipping Date', 'Consignee Name', 'Consignee Town', 'Reference 1', 'Total Price'] if c in unmatched.columns]
+            st.dataframe(unmatched[display_cols_ov].astype(str), use_container_width=True)
 
             csv = unmatched.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Preuzmi nepovezane stavke kao CSV",
+                label="📥 Preuzmi preostale nepovezane stavke (CSV)",
                 data=csv,
-                file_name="nepovezane_overseas_stavke.csv",
+                file_name="skroz_nepovezane_overseas.csv",
                 mime="text/csv",
             )
         else:
-            st.success("Sve stavke s fakture su uspješno povezane!")
+            st.success("Sve stavke su uspješno povezane!")
 
     with tab2:
         st.subheader("Uspješno povezane stavke")
         if len(matched) > 0:
-            display_cols_matched = [c for c in ['Invoice Number', 'Extracted_OT', 'Consignee Name', 'Naziv korisnika', 'Transport Price', 'Total Price'] if c in matched.columns]
-            df_display_matched = matched[display_cols_matched].astype(str)
-            st.dataframe(df_display_matched, use_container_width=True)
+            display_cols_matched = ['Invoice Number', 'Matched_Method', 'Matched_Broj_Otpremnice', 'Consignee Name', 'Matched_Naziv_Korisnika', 'Total Price']
+            st.dataframe(matched[display_cols_matched].astype(str), use_container_width=True)
         else:
-            st.info("Nema uspješno povezanih stavki.")
+            st.info("Nema povezanih stavki.")
 
     with tab3:
-        st.subheader("Detaljna tablica spajanja (Merge Result)")
-        summary_cols = [c for c in ['Invoice Number', 'Reference 1', 'Extracted_OT', 'Consignee Name', '_merge'] if c in merged_df.columns]
-        df_display_summary = merged_df[summary_cols].astype(str)
-        st.dataframe(df_display_summary, use_container_width=True)
+        st.subheader("Sve stavke s označenom metodom spajanja")
+        st.dataframe(df_ov[['Invoice Number', 'Reference 1', 'Consignee Name', 'Matched_Method', 'Matched_Broj_Otpremnice']].astype(str), use_container_width=True)
 
 else:
-    st.info("👈 Molimo vas da učitate obje Excel datoteke u bočnoj traci (sidebaru) kako bi aplikacija pokrenula analizu.")
+   st.info("👈 Molimo vas da učitate obje Excel datoteke u bočnoj traci (sidebaru).")
